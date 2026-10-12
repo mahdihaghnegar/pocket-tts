@@ -1,4 +1,4 @@
-weights_path: E:/AI/pocket-tts/Models/pocket-tts-farsi-v2/model.safetensors
+weights_path: ./Models/pocket-tts-farsi-v2/model.safetensors
 default_temperature: 0.3
 capitalize_first_letter: false
 append_terminal_punctuation: false
@@ -19,7 +19,7 @@ flow_lm:
     dim: 1024
     n_bins: 4000
     tokenizer: sentencepiece
-    tokenizer_path: E:/AI/pocket-tts/Models/pocket-tts-farsi-v2/tokenizer_ph.model
+    tokenizer_path: ./Models/pocket-tts-farsi-v2/tokenizer_ph.model
 mimi:
   dtype: float32
   sample_rate: 24000

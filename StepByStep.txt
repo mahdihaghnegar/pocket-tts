@@ -55,6 +55,9 @@ Get-ChildItem "E:\AI\pocket-tts\Models\pocket-tts-farsi-v2" -Force
     --text "salAm hAle SomA Cetor ?ast" `
     --out .\test_fa.wav
 
+
+.\.venv\Scripts\python.exe -m training.farsi.synthesize --config .\model_farsi_local.yaml --voice .\Models\pocket-tts-farsi-v2\samples\prompt_hello.wav --voice-sec 5 --no-normalize-text --text "salAm hAle SomA Cetor ?ast" --out .\test_fa.wav
+
 # ---------- 5. Serve (optional) ----------
 .\.venv\Scripts\python.exe -m pocket_tts.main serve
 
