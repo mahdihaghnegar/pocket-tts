@@ -70,6 +70,99 @@ CAP_RATIO = 0.97
 # chunk, while bounding worst-case work at 4 extra generations.
 MAX_SPLIT_DEPTH = 2
 
+# Sentence vs clause end marks, for pause selection. G2P discards punctuation,
+# so batch_synthesize / --g2p re-attach a mark AFTER phonemising (see
+# phonemise_clauses): a sentence mark earns --sentence-pause-sec, a clause mark
+# --pause-sec. Only ASCII "?" and ";" exist in the phoneme vocabulary (ids 3
+# and 744); every other mark encodes as UNK, so those two are staged as
+# themselves and every other mark is pause-only (stripped pre-model).
+SENTENCE_ENDS = (".", "!", "?", "؟")
+CLAUSE_ENDS = (",", "،", ";", "؛", ":")
+# Persian mark -> ASCII twin staged in its place. "؟"->"?" doubles as the
+# glottal-stop phoneme, but position disambiguates: the model was trained on
+# "?"-final utterances (halo ?ast = حال خوب است + ؟), never on medial ones.
+
+# Homo-GE2PE notation -> pocket-tts notation (per Models/pocket-tts-farsi-v2/README.md).
+_TO_PHONEMES = str.maketrans({"/": "a", "a": "A", "@": "?", "$": "S", "c": "C"})
+TWIN_Q = "؟"
+TWIN_S = "؛"
+MARK_TWINS = str.maketrans({TWIN_Q: "?", TWIN_S: ";"})
+# Marks that steer chunking/pauses but must never reach the model (all UNK):
+# everything in BREAK_CHARS except the staged twins '?' and ';', plus the
+# ASCII pause marks (, . ! :) that survive twin-mapping in staged text.
+PAUSE_ONLY_MARKS = ''.join(c for c in BREAK_CHARS if c not in '?;') + ',.:!'
+
+
+def phonemise_clauses(text: str, g2p_model: str) -> str:
+    """Persian script -> phoneme text with clause/sentence boundary marks kept.
+
+    Splits on sentence and clause punctuation BEFORE phonemising: G2P discards
+    punctuation, so once text is phonemised there are no boundaries left and
+    any chunker cuts on token count alone, landing mid-phrase. Splitting first
+    is what preserves them. Each clause is phonemised separately, then its end
+    mark is re-attached so split_text() still sees the boundary and inserts
+    the pause (--pause-sec for clauses, --sentence-pause-sec for sentences).
+    """
+    import torch
+    from transformers import AutoTokenizer, T5ForConditionalGeneration
+
+    from training.farsi.normalize_fa import normalize
+
+    g2p_tok = AutoTokenizer.from_pretrained(g2p_model, local_files_only=True)
+    g2p = T5ForConditionalGeneration.from_pretrained(g2p_model, local_files_only=True).eval()
+
+    # Clauses in order, each carrying its end mark. Normalise first (spells
+    # digits out, unifies Arabic/Persian letter variants) -- normalize() folds
+    # ASCII , ? ; onto ، ؟ ؛, so HARD_BREAK/SOFT_BREAK see every variant. "؟"
+    # is stripped per clause: it shares a symbol with the glottal stop in G2P
+    # notation, and what survives is re-attached below as the boundary mark.
+    clauses: list[tuple[str, str]] = []
+    for sentence in HARD_BREAK.split(normalize(text)):
+        for clause in SOFT_BREAK.split(sentence):
+            clause = clause.strip()
+            if not clause:
+                continue
+            mark = ""
+            if clause and clause[-1] in BREAK_CHARS:
+                mark = clause[-1]
+                clause = clause[:-1].strip()
+            if clause:
+                clauses.append((clause.replace("؟", "").replace("?", ""), mark))
+
+    if not clauses:
+        raise ValueError("phonemisation emptied the text: nothing left after splitting")
+
+    # One batched generate() call (5 beams, trained convention) instead of one
+    # per clause.
+    enc = g2p_tok(
+        [c for c, _ in clauses],
+        padding=True,
+        add_special_tokens=False,
+        return_attention_mask=True,
+        return_tensors="pt",
+    )
+    with torch.no_grad():
+        out = g2p.generate(
+            enc["input_ids"],
+            attention_mask=enc["attention_mask"],
+            num_beams=5,
+            min_length=1,
+            max_length=512,
+            early_stopping=True,
+        )
+    raws = [s.strip() for s in g2p_tok.batch_decode(out, skip_special_tokens=True)]
+
+    staged = []
+    for (clause, mark), raw in zip(clauses, raws):
+        if not raw:
+            raise ValueError(f"G2P returned empty for clause: {clause[:60]!r}")
+        # KEEP the "1": ezafe mark for the chunker; stripped before the model.
+        # Twin-map native marks ("؟"->"?", "؛"->";") AND native commas, which
+        # MARK_TWINS leaves alone: a staged "،" would encode as UNK.
+        end = mark.translate(MARK_TWINS).replace("،", ",")
+        staged.append(f"{raw.translate(_TO_PHONEMES)}{end}")
+    return " ".join(staged)
+
 
 def _cap_seconds(model: "TTSModel", text: str) -> float:
     """The length cap pocket-tts will apply to this text, in seconds.
@@ -351,6 +444,13 @@ def main(
     pause_sec: Annotated[
         float, typer.Option(help="silence after a chunk that ends at punctuation")
     ] = 0.15,
+    sentence_pause_sec: Annotated[
+        float | None,
+        typer.Option(
+            help="silence after a sentence-ending mark (. ! ؟). Defaults to --pause-sec; "
+            "set higher for a longer sentence pause than the clause pause"
+        ),
+    ] = None,
     join_sec: Annotated[
         float,
         typer.Option(
@@ -380,6 +480,29 @@ def main(
     normalize_text: Annotated[
         bool, typer.Option(help="apply the training-time Persian normalization first; phoneme input is detected and passed through untouched")
     ] = True,
+    g2p: Annotated[
+        bool,
+        typer.Option(
+            help="phonemise Persian script in-process with local Homo-GE2PE before "
+            "synthesis (v2 takes phonemes, not Persian script). Splits on sentence "
+            "and clause punctuation FIRST -- G2P discards punctuation, so splitting "
+            "after would leave no boundaries and the chunker would cut on token "
+            "count alone, landing mid-phrase. Each clause is phonemised separately "
+            "and its end mark re-attached, so the chunker still sees the boundary "
+            "and inserts --pause-sec / --sentence-pause-sec accordingly"
+        ),
+    ] = False,
+    g2p_model: Annotated[
+        str, typer.Option(help="local Homo-GE2PE folder (transformers-native repack)")
+    ] = r".\Models\Homo-GE2PE-Persian-HF",
+    stage_phonemes: Annotated[
+        str | None,
+        typer.Option(
+            help="write the staged phoneme text (with boundary marks) to this file "
+            "for inspection. The same file can be fed back via --text-file with "
+            "--no-g2p to reproduce the run"
+        ),
+    ] = None,
 ) -> None:
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     from pocket_tts import TTSModel
@@ -389,7 +512,20 @@ def main(
     raw = Path(text_file).read_text(encoding="utf-8") if text_file else text
     if not raw or not raw.strip():
         raise typer.BadParameter("pass --text or --text-file")
-    if normalize_text:
+    if g2p:
+        # Phonemise first (loads the local G2P model), then run the usual
+        # path with normalization OFF: normalize() would delete every
+        # character of phoneme input and return "".
+        from training.farsi.normalize_fa import is_phonemic
+
+        if is_phonemic(raw):
+            raise typer.BadParameter("--g2p got phoneme input; pass Persian script or drop --g2p")
+        raw = phonemise_clauses(raw, g2p_model)
+        if stage_phonemes:
+            Path(stage_phonemes).write_text(raw, encoding="utf-8")
+            logger.info(f"staged phonemes written to {stage_phonemes}")
+        normalize_text = False
+    elif normalize_text:
         # Phoneme input passes through: the Persian normaliser deletes every
         # character of it, and the resulting silence looks like a broken model
         # rather than a mangled argument.
@@ -406,6 +542,10 @@ def main(
 
     sample_rate = int(model.mimi.sample_rate)
     gap = np.zeros(int(pause_sec * sample_rate), dtype=np.float32)
+    sentence_gap = np.zeros(
+        int((sentence_pause_sec if sentence_pause_sec is not None else pause_sec) * sample_rate),
+        dtype=np.float32,
+    )
     join = np.zeros(int(join_sec * sample_rate), dtype=np.float32)
     prompt = voice
     if voice_sec > 0:
@@ -425,7 +565,37 @@ def main(
         # Full chunk text -- truncating this preview once made it look like
         # words were being dropped from generation when they were only being
         # dropped from the printed preview.
+        # Boundary marks steered split_text() and the pause choice below, but
+        # only ";" and word-onset "?" are real phoneme pieces (ids 744, 3):
+        # every other mark encodes as UNK (id 0) and a "?" glued after a word
+        # (?ast?) reads as a medial glottal stop, derailing past EOS.
+        # So: drop pause-only marks everywhere; rebuild each word with at most
+        # an onset "?" (?ast, ?emruz) and, on the last word only, one final
+        # "?" (the trained sentence ending).
         spoken = strip_ezafe(chunk)
+        for _m in PAUSE_ONLY_MARKS:
+            spoken = spoken.replace(_m, "")
+        words = spoken.split()
+        kept = []
+        for wi, w in enumerate(words):
+            if "?" not in w:
+                kept.append(w)
+                continue
+            # Word-onset glottal (?ast, ?emruz): real phoneme, but a trailing
+            # twin on the same word (?ast?) is a boundary mark, not a coda.
+            onset = w.startswith("?")
+            # Chunk-final sentence twin ("...garm ?ast"): the trained ending.
+            final = wi == len(words) - 1 and w.endswith("?") and w.count("?") == 1
+            w = w.replace("?", "")
+            if onset:
+                w = "?" + w
+            if final and not w.endswith("?"):
+                w = w + "?"
+            if w:
+                kept.append(w)
+        spoken = " ".join(kept)
+        if not spoken:
+            continue
         logger.info(f"[{i}/{len(chunks)}] {len(sp.encode(spoken))} tokens: {spoken}")
         pieces.append(
             trim_silence(
@@ -437,9 +607,18 @@ def main(
             )
         )
         if i < len(chunks):
-            # A chunk ending at punctuation gets a real pause; one split
-            # mid-phrase to fit the token budget gets --join-sec instead.
-            pieces.append(gap if chunk.rstrip().endswith(BREAK_CHARS) else join)
+            # A chunk ending at punctuation gets a pause: sentence-ending marks
+            # earn the sentence pause, clause marks the clause pause. One split
+            # mid-phrase to fit the token budget gets --join-sec.
+            # Only "?" and ";" reach the model (real phoneme pieces, ids 3/744);
+            # every other mark is pause-only and stripped from `spoken` above.
+            end = chunk.rstrip()[-1:] if chunk.rstrip() else ""
+            if end in SENTENCE_ENDS:
+                pieces.append(sentence_gap)
+            elif end in BREAK_CHARS:
+                pieces.append(gap)
+            else:
+                pieces.append(join)
 
     wav = np.concatenate(pieces) if pieces else np.zeros(1, dtype=np.float32)
     sphn.write_wav(out, wav, sample_rate)

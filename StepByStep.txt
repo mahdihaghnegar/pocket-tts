@@ -1,3 +1,6 @@
+#https://github.com/mallahyari/pocket-tts
+#https://huggingface.co/mehdi-hf/Homo-GE2PE-Persian-HF
+#https://huggingface.co/mehdi-hf/pocket-tts-farsi-v2
 # pocket-tts Farsi v2 - setup, step by step (Windows PowerShell)
 # Working dir for everything below: E:\AI\pocket-tts
 
@@ -81,3 +84,6 @@ Get-ChildItem "E:\AI\pocket-tts\Models\pocket-tts-farsi-v2" -Force
 # ---------- 5. Serve (optional) ----------
 .\.venv\Scripts\python.exe -m pocket_tts.main serve
 
+
+
+.\.venv\Scripts\python.exe .\batch_synthesize.py
