@@ -95,3 +95,11 @@ italk.yaml
 .venv-train/
 /data*/
 runs/
+
+# local model downloads (large, machine-specific)
+# covers Models/Homo-GE2PE-Persian-*/ + Models/pocket-tts-farsi-v2/
+# (re-download via StepByStep.txt; weights/*.safetensors already ignored above)
+/Models/
+
+# local-only: untracked core model sources (see commit message)
+/pocket_tts/models/

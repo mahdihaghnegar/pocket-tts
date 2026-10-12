@@ -1,18 +1,60 @@
-mkdir E:\AI\pocket-tts-farsi-v2
+# pocket-tts Farsi v2 - setup, step by step (Windows PowerShell)
+# Working dir for everything below: E:\AI\pocket-tts
 
-git clone https://github.com/mallahyari/pocket-tts.git E:\AI\pocket-tts-farsi-v2
-
+# ---------- 0. Clone (pick ONE) ----------
+# Option A - you already have E:\AI\pocket-tts, just enter it:
 Set-Location E:\AI\pocket-tts
+# Option B - fresh clone elsewhere (do NOT clone into E:\AI\pocket-tts, it exists):
+# git clone https://github.com/mallahyari/pocket-tts.git E:\AI\pocket-tts-farsi-v2
+# Set-Location E:\AI\pocket-tts-farsi-v2
 
-
-py  -m venv .venv
+# ---------- 1. Venv + install ----------
+py -V:3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-
+python --version   # must say 3.12.x
 
 python --version
 python -m pip install --upgrade pip
 
+# Editable install WITH audio + farsi extras (sphn, transformers, ...).
+# Plain ".[audio]" misses synth deps (numpy/sphn live in dev group).
+python -m pip install -e ".[audio,dev]"
+# NOTE: always use .\.venv\Scripts\python.exe (or an activated venv).
+# Bare `python` on this machine has no numpy/pocket_tts.
 
-python -m pip install -e ".[audio]"
+# ---------- 2. Smoke test ----------
+.\.venv\Scripts\python.exe -c "import torch; print('PyTorch:', torch.__version__); print('CUDA available:', torch.cuda.is_available())"
+.\.venv\Scripts\python.exe -c "import pocket_tts; print('Pocket-TTS import OK')"
+.\.venv\Scripts\python.exe -m training.farsi.synthesize --help
 
+# ---------- 3. Models (already in .\Models, no re-download needed) ----------
+# pocket-tts-farsi-v2 (phoneme model + tokenizer + local yaml):
+#   Models\pocket-tts-farsi-v2\model.safetensors
+#   Models\pocket-tts-farsi-v2\tokenizer_ph.model
+#   Models\pocket-tts-farsi-v2\model.yaml        <- HF paths (needs net); prefer model_farsi_local.yaml at repo root
+# G2P (Persian script -> phonemes):
+#   Models\Homo-GE2PE-Persian-HF[-clean|-verify]\  (use one of these)
+#   Models\Homo-GE2PE-Persian-original\            (raw vendor dump, inspect-only)
+# Re-download only if missing:
+# hf download mehdi-hf/pocket-tts-farsi-v2 --local-dir "E:\AI\pocket-tts\Models\pocket-tts-farsi-v2"
+Get-ChildItem .\Models -Force
+Get-ChildItem "E:\AI\pocket-tts\Models\pocket-tts-farsi-v2" -Force
+
+# ---------- 4. Synthesize (phoneme input! Persian script -> silence) ----------
+# model_farsi_local.yaml at repo root = copy of Models\pocket-tts-farsi-v2\model.yaml
+# with weights_path/tokenizer_path rewritten to local E:/AI/... absolute paths
+# so no HuggingFace download happens at runtime.
+# "salAm hAle SomA Cetor ?ast" = phonemes for "سلام، حال شما چطور است؟" (see Models\pocket-tts-farsi-v2\README.md phonemise()).
+# --voice-sec 5 trims the prompt (training cap was 5s; longer prompts replay the prompt).
+# --no-normalize-text = correct here ONLY because input is already phonemes (else keep default).
+.\.venv\Scripts\python.exe -m training.farsi.synthesize `
+    --config .\model_farsi_local.yaml `
+    --voice .\training\farsi\examples\01_greeting.wav `
+    --voice-sec 5 `
+    --no-normalize-text `
+    --text "salAm hAle SomA Cetor ?ast" `
+    --out .\test_fa.wav
+
+# ---------- 5. Serve (optional) ----------
+.\.venv\Scripts\python.exe -m pocket_tts.main serve
 
